@@ -1,0 +1,199 @@
+# -*- coding: utf-8 -*-
+"""To Do List - 공학컴퓨터프로그래밍 프로젝트 (코드.py)
+제약조건: Python 표준 라이브러리만 사용, 클래스 단일 상속만 사용, 200줄 이내 작성
+기능: 오프라인 실행, 부팅 시 자동 실행, 5분 단위/종일/기간 일정, 체크 시 취소선, 자동 저장"""
+import json, os, sys, uuid
+from datetime import datetime, timedelta
+import tkinter as tk
+from tkinter import ttk, messagebox, simpledialog, font as tkfont
+
+DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "todos.json")
+STARTUP_DIR = os.path.join(os.environ.get("APPDATA", ""), r"Microsoft\Windows\Start Menu\Programs\Startup")
+STARTUP_VBS = os.path.join(STARTUP_DIR, "TodoList_AutoStart.vbs")
+DAYS_KO = ["월", "화", "수", "목", "금", "토", "일"]
+
+class TaskManager:
+    """할 일 데이터 영구 저장/관리 및 Windows 시작 프로그램 설정"""
+    def __init__(self, data_file=DATA_FILE):
+        self.data_file = data_file; self.tasks = self.load_tasks()
+
+    def load_tasks(self):
+        if os.path.exists(self.data_file):
+            try:
+                with open(self.data_file, "r", encoding="utf-8") as f: return json.load(f)
+            except Exception: pass
+        return []
+
+    def save_tasks(self):
+        try:
+            with open(self.data_file, "w", encoding="utf-8") as f: json.dump(self.tasks, f, ensure_ascii=False, indent=2)
+        except Exception as e: print(f"저장 실패: {e}")
+
+    def add_task(self, title, s_date, e_date, is_all_day, time_str=""):
+        task = {"id": str(uuid.uuid4())[:8], "title": title.strip(), "start_date": s_date,
+                "end_date": e_date, "is_all_day": is_all_day, "time": "" if is_all_day else time_str,
+                "completed": False, "created_at": datetime.now().strftime("%Y-%m-%d %H:%M")}
+        self.tasks.append(task); self.save_tasks()
+        return task
+
+    def toggle_task(self, tid):
+        for t in self.tasks:
+            if t["id"] == tid: t["completed"] = not t.get("completed", False)
+        self.save_tasks()
+
+    def delete_task(self, tid):
+        self.tasks = [t for t in self.tasks if t["id"] != tid]; self.save_tasks()
+
+    def get_tasks_for_date(self, target_date):
+        m = [t for t in self.tasks if t.get("start_date", "") <= target_date <= t.get("end_date", t.get("start_date", ""))]
+        m.sort(key=lambda x: (not x.get("is_all_day", False), x.get("time", "")))
+        return m
+
+    @staticmethod
+    def is_autostart_enabled(): return os.path.exists(STARTUP_VBS)
+
+    @staticmethod
+    def set_autostart(enable: bool):
+        if enable and os.path.exists(STARTUP_DIR):
+            pyw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+            vbs = f'Set W=CreateObject("WScript.Shell")\nW.Run """{pyw if os.path.exists(pyw) else sys.executable}"" """{os.path.abspath(__file__)}""", 0, False\n'
+            for enc in ("cp949", "utf-8"):
+                try:
+                    with open(STARTUP_VBS, "w", encoding=enc) as f: f.write(vbs)
+                    return True
+                except Exception: pass
+        elif not enable and os.path.exists(STARTUP_VBS):
+            try: os.remove(STARTUP_VBS)
+            except OSError: pass
+        return False
+
+class AddTaskDialog(tk.Toplevel):
+    """새로운 할 일을 추가하는 모달 대화상자 (단일 상속)"""
+    def __init__(self, parent, initial_date, on_add):
+        super().__init__(parent)
+        self.title("할 일 추가"); self.resizable(False, False)
+        self.on_add = on_add; self.transient(parent); self.grab_set()
+        self.t_var, self.s_var, self.e_var = tk.StringVar(), tk.StringVar(value=initial_date), tk.StringVar(value=initial_date)
+        self.range_var, self.all_day_var = tk.BooleanVar(value=False), tk.BooleanVar(value=True)
+        self.h_var, self.m_var = tk.StringVar(value="09"), tk.StringVar(value="00")
+
+        p = ttk.Frame(self, padding=12); p.pack(fill="both", expand=True)
+        ttk.Label(p, text="할 일:", font=("Malgun Gothic", 10, "bold")).grid(row=0, column=0, sticky="w", padx=5, pady=4)
+        self.ent = ttk.Entry(p, textvariable=self.t_var, width=28, font=("Malgun Gothic", 10)); self.ent.grid(row=0, column=1, columnspan=3, sticky="w", padx=5, pady=4)
+        ttk.Label(p, text="시작 날짜:").grid(row=1, column=0, sticky="w", padx=5, pady=4)
+        ttk.Entry(p, textvariable=self.s_var, width=14).grid(row=1, column=1, sticky="w", padx=5, pady=4)
+        ttk.Checkbutton(p, text="여러 날(기간) 설정", variable=self.range_var, command=self._toggle_range).grid(row=2, column=0, columnspan=2, sticky="w", padx=5, pady=2)
+        self.end_box = ttk.Frame(p); ttk.Label(self.end_box, text="종료 날짜:").pack(side="left")
+        ttk.Entry(self.end_box, textvariable=self.e_var, width=14).pack(side="left", padx=5)
+        ttk.Checkbutton(p, text="하루 전체 (종일)", variable=self.all_day_var, command=self._toggle_time).grid(row=4, column=0, columnspan=2, sticky="w", padx=5, pady=(6, 2))
+        self.t_box = ttk.Frame(p); ttk.Label(self.t_box, text="시간:").pack(side="left")
+        ttk.Combobox(self.t_box, textvariable=self.h_var, values=[f"{h:02d}" for h in range(24)], width=3, state="readonly").pack(side="left", padx=2)
+        ttk.Label(self.t_box, text="시").pack(side="left")
+        ttk.Combobox(self.t_box, textvariable=self.m_var, values=[f"{m:02d}" for m in range(0, 60, 5)], width=3, state="readonly").pack(side="left", padx=2)
+        ttk.Label(self.t_box, text="분 (5분 단위)").pack(side="left")
+
+        bb = ttk.Frame(p); bb.grid(row=6, column=0, columnspan=4, pady=(12, 0))
+        ttk.Button(bb, text="추가", width=10, command=self._submit).pack(side="left", padx=5)
+        ttk.Button(bb, text="취소", width=10, command=self.destroy).pack(side="left", padx=5)
+        self.geometry(f"+{parent.winfo_rootx() + 50}+{parent.winfo_rooty() + 50}"); self.ent.focus_set()
+
+    def _toggle_range(self): self.end_box.grid(row=3, column=0, columnspan=3, sticky="w", padx=5, pady=2) if self.range_var.get() else self.end_box.grid_forget()
+    def _toggle_time(self): self.t_box.grid(row=5, column=0, columnspan=4, sticky="w", padx=10, pady=2) if not self.all_day_var.get() else self.t_box.grid_forget()
+
+    def _submit(self):
+        title, s = self.t_var.get().strip(), self.s_var.get().strip()
+        e = self.e_var.get().strip() if self.range_var.get() else s
+        if not title: return messagebox.showwarning("확인", "할 일을 입력해주세요.", parent=self)
+        try: datetime.strptime(s, "%Y-%m-%d"); datetime.strptime(e, "%Y-%m-%d")
+        except ValueError: return messagebox.showerror("오류", "날짜는 YYYY-MM-DD 형식이어야 합니다.", parent=self)
+        if s > e: return messagebox.showerror("오류", "종료일이 시작일보다 빠를 수 없습니다.", parent=self)
+        t_str = f"{self.h_var.get()}:{self.m_var.get()}" if not self.all_day_var.get() else ""
+        self.on_add(title, s, e, self.all_day_var.get(), t_str); self.destroy()
+
+class TodoApp(tk.Tk):
+    """메인 To Do List GUI 애플리케이션 (단일 상속)"""
+    def __init__(self):
+        super().__init__()
+        self.title("To Do List"); self.geometry("540x680"); self.minsize(480, 520)
+        self.manager, self.cur_date = TaskManager(), datetime.now().date()
+        self.normal_f, self.done_f = tkfont.Font(family="Malgun Gothic", size=10), tkfont.Font(family="Malgun Gothic", size=10, overstrike=1)
+
+        hdr = ttk.Frame(self, padding=(12, 8)); hdr.pack(fill="x")
+        ttk.Label(hdr, text="To Do List", font=("Malgun Gothic", 15, "bold")).pack(side="left")
+        self.auto_var = tk.BooleanVar(value=self.manager.is_autostart_enabled())
+        ttk.Checkbutton(hdr, text="부팅 시 자동 실행", variable=self.auto_var, command=lambda: self.manager.set_autostart(self.auto_var.get())).pack(side="right")
+        nav = ttk.Frame(self, padding=(10, 2)); nav.pack(fill="x")
+        ttk.Button(nav, text="◀", width=3, command=lambda: self._shift(-1)).pack(side="left", padx=2)
+        ttk.Button(nav, text="오늘", width=5, command=self._today).pack(side="left", padx=2)
+        ttk.Button(nav, text="▶", width=3, command=lambda: self._shift(1)).pack(side="left", padx=2)
+        ttk.Button(nav, text="📅 이동", width=6, command=self._jump).pack(side="right", padx=2)
+        self.btn_f = ttk.Frame(self, padding=(10, 4)); self.btn_f.pack(fill="x")
+        self.info_lbl = ttk.Label(self, text="", font=("Malgun Gothic", 10, "bold"), padding=(12, 3)); self.info_lbl.pack(anchor="w")
+
+        box = ttk.Frame(self); box.pack(fill="both", expand=True, padx=10, pady=5)
+        self.canvas = tk.Canvas(box, highlightthickness=0)
+        self.scrl = ttk.Scrollbar(box, orient="vertical", command=self.canvas.yview)
+        self.list_f = ttk.Frame(self.canvas)
+        self.list_f.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+        self.win = self.canvas.create_window((0, 0), window=self.list_f, anchor="nw")
+        self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfig(self.win, width=e.width))
+        self.canvas.configure(yscrollcommand=self.scrl.set)
+        self.canvas.pack(side="left", fill="both", expand=True); self.scrl.pack(side="right", fill="y")
+        self.canvas.bind_all("<MouseWheel>", lambda e: self.canvas.yview_scroll(int(-1 * (e.delta / 120)), "units"))
+
+        bot = ttk.Frame(self, padding=8); bot.pack(fill="x")
+        ttk.Button(bot, text="+ 새 할 일 추가", command=self._open_add).pack(fill="x", ipady=3)
+        self.protocol("WM_DELETE_WINDOW", self._on_close); self.refresh()
+
+    def refresh(self):
+        for w in self.btn_f.winfo_children(): w.destroy()
+        today, st = datetime.now().date(), self.cur_date - timedelta(days=3)
+        for i in range(7):
+            d = st + timedelta(days=i)
+            c, t = (d == self.cur_date), (d == today)
+            btn = tk.Button(self.btn_f, text=f"{d.month}/{d.day}\n({DAYS_KO[d.weekday()]})", width=6, relief="flat",
+                            bg="#2563eb" if c else ("#e0e7ff" if t else "#f1f5f9"), fg="white" if c else "#1e293b",
+                            font=("Malgun Gothic", 9, "bold" if c or t else "normal"), command=lambda x=d: self._set_date(x))
+            btn.pack(side="left", expand=True, fill="x", padx=1)
+
+        d_str = str(self.cur_date)
+        tasks = self.manager.get_tasks_for_date(d_str)
+        done = sum(1 for x in tasks if x.get("completed", False))
+        tag = " [오늘]" if self.cur_date == today else ""
+        self.info_lbl.config(text=f"📅 {d_str} ({DAYS_KO[self.cur_date.weekday()]}){tag} — 총 {len(tasks)}개 중 {done}개 완료")
+
+        for w in self.list_f.winfo_children(): w.destroy()
+        if not tasks: return ttk.Label(self.list_f, text="등록된 할 일이 없습니다.", font=("Malgun Gothic", 10), foreground="#64748b", padding=20).pack()
+
+        for t in tasks:
+            row = tk.Frame(self.list_f, bg="#ffffff", bd=1, relief="solid", padx=8, pady=5); row.pack(fill="x", pady=3, padx=2)
+            done_v = t.get("completed", False)
+            chk = tk.BooleanVar(value=done_v)
+            def _tog(tid=t["id"]): self.manager.toggle_task(tid); self.refresh()
+            tk.Checkbutton(row, variable=chk, command=_tog, bg="#ffffff", activebackground="#ffffff").pack(side="left")
+            tt = "[종일]" if t.get("is_all_day") else f"[{t.get('time', '')}]"
+            rt = f" ({t['start_date'][5:]}~{t['end_date'][5:]})" if t.get("start_date") != t.get("end_date") else ""
+            lbl = tk.Label(row, text=f"{tt}{rt} {t['title']}", anchor="w", bg="#ffffff",
+                           fg="#94a3b8" if done_v else "#1e293b", font=self.done_f if done_v else self.normal_f)
+            lbl.pack(side="left", fill="x", expand=True, padx=4)
+            tk.Button(row, text="✕", fg="#ef4444", bg="#ffffff", relief="flat", font=("Malgun Gothic", 9, "bold"),
+                      command=lambda tid=t["id"]: self._del_task(tid)).pack(side="right")
+
+    def _set_date(self, d): self.cur_date = d; self.refresh()
+    def _shift(self, n): self.cur_date += timedelta(days=n); self.refresh()
+    def _today(self): self.cur_date = datetime.now().date(); self.refresh()
+    def _on_close(self): self.manager.save_tasks(); self.destroy()
+    def _jump(self):
+        v = simpledialog.askstring("날짜 이동", "이동할 날짜 (YYYY-MM-DD):", initialvalue=str(self.cur_date), parent=self)
+        if v:
+            try:
+                self.cur_date = datetime.strptime(v.strip(), "%Y-%m-%d").date(); self.refresh()
+            except ValueError: messagebox.showerror("오류", "올바른 날짜 형식(YYYY-MM-DD)이 아닙니다.", parent=self)
+
+    def _open_add(self): AddTaskDialog(self, str(self.cur_date), lambda ti, s, e, a, tm: (self.manager.add_task(ti, s, e, a, tm), self.refresh()))
+    def _del_task(self, tid):
+        if messagebox.askyesno("삭제 확인", "이 할 일을 삭제하시겠습니까?", parent=self): self.manager.delete_task(tid); self.refresh()
+
+if __name__ == "__main__":
+    app = TodoApp()
+    app.mainloop()
