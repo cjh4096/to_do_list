@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
 """To Do List - 공학컴퓨터프로그래밍 프로젝트 (코드.py)
 제약조건: Python 표준 라이브러리만 사용, 클래스 단일 상속만 사용, 200줄 이내 작성
-기능: 오프라인 실행, 부팅 시 자동 실행, 5분 단위/종일/기간 일정, 체크 시 취소선, 자동 저장"""
-import json, os, sys, uuid
+기능: 오프라인 실행, 부팅 시 자동 실행, 5분 단위/종일/기간 일정, 체크 시 취소선, 자동 저장
+[API 업데이트] OpenWeatherMap 예보를 불러와 선택한 날짜의 날씨와 비/눈 알림을 표시 (weather.py)"""
+import json, os, sys, uuid, threading
 from datetime import datetime, timedelta
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog, font as tkfont
+from weather import WeatherClient, WeatherError
 
 DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "todos.json")
 STARTUP_DIR = os.path.join(os.environ.get("APPDATA", ""), r"Microsoft\Windows\Start Menu\Programs\Startup")
@@ -127,8 +129,11 @@ class TodoApp(tk.Tk):
         ttk.Button(nav, text="오늘", width=5, command=self._today).pack(side="left", padx=2)
         ttk.Button(nav, text="▶", width=3, command=lambda: self._shift(1)).pack(side="left", padx=2)
         ttk.Button(nav, text="📅 이동", width=6, command=self._jump).pack(side="right", padx=2)
+        ttk.Button(nav, text="🔄 날씨", width=7, command=self._load_weather).pack(side="right", padx=2)
         self.btn_f = ttk.Frame(self, padding=(10, 4)); self.btn_f.pack(fill="x")
         self.info_lbl = ttk.Label(self, text="", font=("Malgun Gothic", 10, "bold"), padding=(12, 3)); self.info_lbl.pack(anchor="w")
+        self.weather_lbl = ttk.Label(self, text="", font=("Malgun Gothic", 10), foreground="#0f766e", padding=(12, 0)); self.weather_lbl.pack(anchor="w")
+        self.weather, self.forecast, self.weather_msg = WeatherClient(), {}, "🌡 날씨 불러오는 중..."
 
         box = ttk.Frame(self); box.pack(fill="both", expand=True, padx=10, pady=5)
         self.canvas = tk.Canvas(box, highlightthickness=0)
@@ -143,7 +148,7 @@ class TodoApp(tk.Tk):
 
         bot = ttk.Frame(self, padding=8); bot.pack(fill="x")
         ttk.Button(bot, text="+ 새 할 일 추가", command=self._open_add).pack(fill="x", ipady=3)
-        self.protocol("WM_DELETE_WINDOW", self._on_close); self.refresh()
+        self.protocol("WM_DELETE_WINDOW", self._on_close); self.refresh(); self._load_weather()
 
     def refresh(self):
         for w in self.btn_f.winfo_children(): w.destroy()
@@ -161,6 +166,7 @@ class TodoApp(tk.Tk):
         done = sum(1 for x in tasks if x.get("completed", False))
         tag = " [오늘]" if self.cur_date == today else ""
         self.info_lbl.config(text=f"📅 {d_str} ({DAYS_KO[self.cur_date.weekday()]}){tag} — 총 {len(tasks)}개 중 {done}개 완료")
+        self.weather_lbl.config(text=self._weather_text(d_str, tasks))
 
         for w in self.list_f.winfo_children(): w.destroy()
         if not tasks: return ttk.Label(self.list_f, text="등록된 할 일이 없습니다.", font=("Malgun Gothic", 10), foreground="#64748b", padding=20).pack()
@@ -178,6 +184,30 @@ class TodoApp(tk.Tk):
             lbl.pack(side="left", fill="x", expand=True, padx=4)
             tk.Button(row, text="✕", fg="#ef4444", bg="#ffffff", relief="flat", font=("Malgun Gothic", 9, "bold"),
                       command=lambda tid=t["id"]: self._del_task(tid)).pack(side="right")
+
+    def _weather_text(self, d_str, tasks):
+        """선택한 날짜의 예보 문구를 만든다. 비/눈 예보 + 할 일이 있으면 우산 알림을 붙인다."""
+        w = self.forecast.get(d_str)
+        if not w: return "🌡 이 날짜는 예보 범위(약 5일) 밖입니다." if self.forecast else self.weather_msg
+        text = f"{w['icon']} {self.weather.city.split(',')[0]} {w['desc']}  {w['min']}° ~ {w['max']}°C"
+        return text + ("   ☔ 비/눈 예보가 있어요. 우산 챙기세요!" if w["rain"] and tasks else "")
+
+    def _load_weather(self):
+        """API 호출은 시간이 걸리므로 별도 스레드에서 실행해 화면이 멈추지 않게 한다."""
+        self._w_result, self.weather_msg = None, "🌡 날씨 불러오는 중..."
+        def work():
+            try: self._w_result = ("ok", self.weather.fetch_daily())
+            except WeatherError as e: self._w_result = ("err", str(e))
+            except Exception: self._w_result = ("err", "알 수 없는 오류가 발생했습니다")
+        threading.Thread(target=work, daemon=True).start(); self.refresh(); self._poll_weather()
+
+    def _poll_weather(self):
+        """스레드 결과를 0.3초마다 확인하고, 도착하면 화면을 갱신한다 (tkinter는 메인 스레드에서만 갱신)."""
+        if self._w_result is None: return self.after(300, self._poll_weather)
+        kind, value = self._w_result
+        if kind == "ok": self.forecast = value
+        else: self.forecast, self.weather_msg = {}, f"🌡 날씨: {value}"
+        self.refresh()
 
     def _set_date(self, d): self.cur_date = d; self.refresh()
     def _shift(self, n): self.cur_date += timedelta(days=n); self.refresh()
